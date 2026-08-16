@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <rect width="128" height="128" rx="28" fill="#1e66f5"/>
+  <!-- suspension arch -->
+  <path d="M20 94 V66 Q64 26 108 66 V94" fill="none" stroke="#ffffff" stroke-width="9"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- deck -->
+  <rect x="16" y="90" width="96" height="9" rx="4.5" fill="#ffffff"/>
+  <!-- piers -->
+  <line x1="44" y1="47" x2="44" y2="90" stroke="#ffffff" stroke-width="7" stroke-linecap="round"/>
+  <line x1="84" y1="47" x2="84" y2="90" stroke="#ffffff" stroke-width="7" stroke-linecap="round"/>
+  <!-- connection node (the 'bridge' to the agent) -->
+  <circle cx="64" cy="48" r="7" fill="#8ec5ff"/>
+</svg>

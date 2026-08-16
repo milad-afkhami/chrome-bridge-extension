@@ -1,0 +1,10 @@
+{
+  "name": "chrome-bridge-server",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": { "chrome-bridge": "index.js" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "ws": "^8.18.0"
+  }
+}

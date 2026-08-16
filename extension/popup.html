@@ -1,0 +1,108 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      :root {
+        --field-a: #14428f;
+        --field-b: #0a2a63;
+        --ink: #eaf1ff;
+        --dim: #7f9fd6;
+        --line: rgba(255, 255, 255, 0.12);
+        --live: #5eead4;
+        --warn: #f7c56a;
+        --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+        --sans: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; background: var(--field-b); }
+      body {
+        width: 300px;
+        padding: 14px;
+        color: var(--ink);
+        background:
+          radial-gradient(120% 80% at 50% -10%, rgba(94, 234, 212, 0.10), transparent 60%),
+          linear-gradient(165deg, var(--field-a), var(--field-b));
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .cb-mark { display: flex; align-items: baseline; justify-content: space-between; }
+      .cb-name { font: 800 12.5px var(--sans); letter-spacing: 0.2em; color: var(--ink); }
+      .cb-ver { font: 10px var(--mono); color: var(--dim); letter-spacing: 0.05em; }
+
+      /* Signature: the live cable */
+      .cb-cable { position: relative; height: 40px; margin: 6px 0 2px; }
+      .cb-cable svg { position: absolute; inset: 0; color: rgba(255, 255, 255, 0.5); }
+      .cb-cable .cbl { transition: stroke-dasharray 0.3s; }
+      .cb-off .cb-cable svg { color: var(--warn); }
+      .cb-off .cb-cable .cbl { stroke-dasharray: 5 5; opacity: 0.8; }
+      .cb-pulse {
+        position: absolute; top: 0; left: 0; width: 8px; height: 8px; border-radius: 50%;
+        background: var(--live); box-shadow: 0 0 9px 1px var(--live);
+        offset-path: path("M 20 29 Q 136 -2 252 29");
+        offset-rotate: 0deg;
+        animation: cb-run 2.6s linear infinite;
+        transition: opacity 0.3s;
+      }
+      @keyframes cb-run { from { offset-distance: 0%; } to { offset-distance: 100%; } }
+      .cb-off .cb-pulse { opacity: 0; }
+      @media (prefers-reduced-motion: reduce) {
+        .cb-pulse { animation: none; offset-distance: 50%; }
+      }
+
+      .cb-status { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+      .cb-pip { width: 8px; height: 8px; border-radius: 50%; background: var(--live); box-shadow: 0 0 8px var(--live); }
+      .cb-word { font: 11px var(--mono); letter-spacing: 0.16em; text-transform: uppercase; color: var(--live); }
+      .cb-off .cb-pip { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+      .cb-off .cb-word { color: var(--warn); }
+
+      .cb-row { display: flex; align-items: baseline; justify-content: space-between; padding: 6px 0; border-top: 1px solid var(--line); gap: 12px; }
+      .cb-k { font: 10px var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); white-space: nowrap; flex-shrink: 0; }
+      .cb-v { font: 12px var(--mono); color: var(--ink); text-align: right; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+
+      .cb-btn {
+        width: 100%; margin-top: 12px; padding: 8px; cursor: pointer;
+        background: transparent; border: 1px solid var(--line); border-radius: 7px;
+        color: var(--ink); font: 11px var(--mono); letter-spacing: 0.12em; text-transform: uppercase;
+        transition: border-color 0.15s, background 0.15s, color 0.15s;
+      }
+      .cb-btn:hover { border-color: var(--live); }
+      .cb-btn:focus-visible { outline: 2px solid var(--live); outline-offset: 2px; }
+      .cb-off .cb-btn { background: var(--live); border-color: var(--live); color: #06251f; font-weight: 700; }
+
+      .cb-tools { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); font: 10px/1.9 var(--mono); color: var(--dim); }
+      .cb-tool { transition: color 0.2s; }
+      .cb-tool.on { color: var(--live); }
+      .cb-sep { opacity: 0.4; }
+    </style>
+  </head>
+  <body id="cb">
+    <div class="cb-mark"><span class="cb-name">CHROME&nbsp;BRIDGE</span><span class="cb-ver">v0.2</span></div>
+
+    <div class="cb-cable" aria-hidden="true">
+      <svg viewBox="0 0 272 40" width="272" height="40" fill="none" stroke="currentColor" stroke-linecap="round">
+        <line class="cbl" x1="8" y1="31" x2="264" y2="31" stroke-width="1.5" />
+        <path class="cbl" d="M 20 29 Q 136 -2 252 29" stroke-width="1.5" />
+        <line class="cbl" x1="84" y1="15" x2="84" y2="31" stroke-width="1.5" />
+        <line class="cbl" x1="188" y1="15" x2="188" y2="31" stroke-width="1.5" />
+      </svg>
+      <div class="cb-pulse" id="pulse"></div>
+    </div>
+
+    <div class="cb-status"><span class="cb-pip"></span><span class="cb-word" id="statusWord">connecting…</span></div>
+
+    <div class="cb-row"><span class="cb-k">Server</span><span class="cb-v" id="url">127.0.0.1:9223</span></div>
+    <div class="cb-row"><span class="cb-k">Uptime</span><span class="cb-v" id="uptime">—</span></div>
+    <div class="cb-row"><span class="cb-k">Tabs</span><span class="cb-v" id="tabs">—</span></div>
+    <div class="cb-row"><span class="cb-k">Last tool</span><span class="cb-v" id="last">—</span></div>
+    <div class="cb-row"><span class="cb-k">Calls</span><span class="cb-v" id="count">—</span></div>
+
+    <button class="cb-btn" id="reconnect">Reconnect</button>
+
+    <div class="cb-tools" id="tools">
+      <span class="cb-tool" data-t="list_tabs">list_tabs</span><span class="cb-sep"> · </span><span class="cb-tool" data-t="read">read</span><span class="cb-sep"> · </span><span class="cb-tool" data-t="exec">exec</span><span class="cb-sep"> · </span><span class="cb-tool" data-t="navigate">navigate</span><span class="cb-sep"> · </span><span class="cb-tool" data-t="open_tab">open_tab</span><span class="cb-sep"> · </span><span class="cb-tool" data-t="close_tab">close_tab</span><span class="cb-sep"> · </span><span class="cb-tool" data-t="screenshot">screenshot</span><span class="cb-sep"> · </span><span class="cb-tool" data-t="upload_file">upload_file</span><span class="cb-sep"> · </span><span class="cb-tool" data-t="network_capture">network_capture</span>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
