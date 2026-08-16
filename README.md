@@ -93,7 +93,13 @@ never take the bridge down.
 
 ## Notes / limits
 - **exec + strict CSP:** MAIN-world eval is blocked by some pages' `Content-Security-Policy` (GitHub,
-  Google, some banks) → `exec` returns `null` there. `read`/`navigate`/screenshot still work.
+  Google, some banks) → `exec` returns `null` there. `read`/`snapshot`/`click`/`fill`/`navigate`/
+  screenshot still work (static functions, no eval).
+- **Snapshot refs are ephemeral:** `data-cb-ref="eN"` refs stay valid only until the DOM re-renders or
+  the page navigates. Re-`snapshot` before reusing refs; use a CSS `selector` when you need durability.
+- **Privileged pages aren't scriptable:** `about:blank`, `chrome://*`, and the Chrome Web Store can't
+  be read/exec'd/snapshotted (`<all_urls>` doesn't grant them) — expect an "Extension manifest must
+  request permission to access this host" error.
 - **Focus:** nothing calls `chrome.tabs.update(..., {active:true})` except `screenshot` of a background
   tab (brief flash-and-restore).
 - **Parallelism vs isolation:** drive many tabs in parallel by `tabId` (shared login); true isolation =
