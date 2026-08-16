@@ -47,6 +47,12 @@ Restart Claude Code (`claude --continue`) so the tools load (MCP servers load at
 - Popup shows connection status + last action + command count. Auto-connects; no per-tab step.
 - Optional: **Details → Allow in Incognito** if you want `open_tab {incognito:true}` to work.
 
+## Sharing & updates
+Public repo: **https://github.com/milad-afkhami/chrome-bridge-extension** — clone it and follow
+**Install** above. Not on the Chrome Web Store, so: loading unpacked shows Chrome's
+*"disable developer-mode extensions"* bubble on some startups → click **Keep** (it stays enabled),
+and updates are manual — `git pull`, then reload the extension at `chrome://extensions`.
+
 ## Architecture: hub / controller (why it's stable)
 Multiple server instances **cooperate** instead of fighting over the port:
 - the first to bind `9223` is the **HUB** and owns the single extension connection;
