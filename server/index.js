@@ -122,7 +122,7 @@ function call(action, params = {}, timeoutMs = 30000) {
 const out = (data) => ({ content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data, null, 2) }] });
 
 // ---------------- MCP server + tools ----------------
-const server = new McpServer({ name: 'chrome-bridge', version: '0.2.0' });
+const server = new McpServer({ name: 'chrome-bridge', version: '0.3.0' });
 
 server.registerTool('list_tabs',
   { description: 'List open browser tabs as [{tabId, url, title, active}]. Read-only; never changes focus.', inputSchema: {} },
@@ -145,15 +145,121 @@ server.registerTool('exec',
 server.registerTool('read',
   {
     description:
-      'Read a tab\'s content without focusing it. Returns visible text by default, or outerHTML when ' +
-      'html=true. Optional CSS selector to read a single element instead of the whole document.',
+      'Read a tab\'s content without focusing it. format:"text" (default) = visible innerText; ' +
+      '"html" = outerHTML; "markdown" = the main/article content as clean Markdown (headings, links, ' +
+      'lists, code) — great for reading an article without HTML bloat. Optional CSS selector to read a ' +
+      'single element instead of the whole document. Works everywhere incl. strict-CSP sites (no eval).',
     inputSchema: {
       tabId: z.number().optional().describe('Target tab id. Omit to use the active tab.'),
       selector: z.string().optional().describe('CSS selector; omit for the whole document.'),
-      html: z.boolean().optional().describe('true = outerHTML, false/omit = innerText.'),
+      format: z.enum(['text', 'html', 'markdown']).optional().describe('text (default) | html | markdown.'),
+      html: z.boolean().optional().describe('Deprecated alias for format:"html".'),
     },
   },
-  async ({ tabId, selector, html }) => out(await call('read', { tabId, selector, html })));
+  async ({ tabId, selector, format, html }) => out(await call('read', { tabId, selector, format, html })));
+
+server.registerTool('snapshot',
+  {
+    description:
+      'Structured accessibility outline of a tab — the fast way to understand a page and act on it ' +
+      'WITHOUT dumping raw HTML. Returns an indented YAML-ish tree of interactive/landmark elements ' +
+      'with roles, accessible names, and a stable ref, e.g. `- button "Sign in" [ref=e7]`. Pass those ' +
+      'refs to click/fill/hover to act without guessing CSS selectors. Built via a static function ' +
+      '(no eval) so it works even on strict-CSP sites where exec is blocked. interactiveOnly:false also ' +
+      'includes headings/landmarks for reading structure.',
+    inputSchema: {
+      tabId: z.number().optional().describe('Target tab id. Omit to use the active tab.'),
+      selector: z.string().optional().describe('Limit the snapshot to this container (CSS selector).'),
+      interactiveOnly: z.boolean().optional().describe('Default true. false = also list headings/landmarks.'),
+    },
+  },
+  async ({ tabId, selector, interactiveOnly }) => out(await call('snapshot', { tabId, selector, interactiveOnly })));
+
+server.registerTool('click',
+  {
+    description:
+      'Click an element by its snapshot ref (preferred) or a CSS selector. Scrolls it into view first. ' +
+      'Runs in the page in the background — no focus change, no banner, works on strict-CSP sites.',
+    inputSchema: {
+      ref: z.string().optional().describe('A ref from snapshot, e.g. "e7".'),
+      selector: z.string().optional().describe('CSS selector (use if you have no ref).'),
+      tabId: z.number().optional(),
+    },
+  },
+  async ({ ref, selector, tabId }) => out(await call('click', { ref, selector, tabId })));
+
+server.registerTool('fill',
+  {
+    description:
+      'Type a value into an input/textarea/contenteditable by snapshot ref or CSS selector. Uses the ' +
+      'native value setter and fires input+change events so React/Vue notice. submit:true also presses ' +
+      'Enter and submits the enclosing form. No focus change, no banner.',
+    inputSchema: {
+      value: z.string().describe('Text to set.'),
+      ref: z.string().optional().describe('A ref from snapshot, e.g. "e12".'),
+      selector: z.string().optional().describe('CSS selector (use if you have no ref).'),
+      submit: z.boolean().optional().describe('Press Enter / submit the form after filling.'),
+      tabId: z.number().optional(),
+    },
+  },
+  async ({ value, ref, selector, submit, tabId }) => out(await call('fill', { value, ref, selector, submit, tabId })));
+
+server.registerTool('hover',
+  {
+    description:
+      'Hover an element by snapshot ref or CSS selector — dispatches real pointer/mouse-over events to ' +
+      'trigger hover menus and tooltips that a plain click can\'t. No focus change, no banner.',
+    inputSchema: {
+      ref: z.string().optional().describe('A ref from snapshot.'),
+      selector: z.string().optional().describe('CSS selector.'),
+      tabId: z.number().optional(),
+    },
+  },
+  async ({ ref, selector, tabId }) => out(await call('hover', { ref, selector, tabId })));
+
+server.registerTool('wait_for',
+  {
+    description:
+      'Wait until a condition holds in a tab, polling in-page every 250ms (no banner). Provide ONE of: ' +
+      'selector (wait until it appears, or disappears if gone:true), or text (wait until the page ' +
+      'contains it). With neither, waits for document.readyState === "complete". Returns {ok, waitedMs} ' +
+      'or errors on timeout. Use after navigate/click on dynamic pages instead of guessing.',
+    inputSchema: {
+      selector: z.string().optional().describe('CSS selector to wait for.'),
+      text: z.string().optional().describe('Substring of visible text to wait for.'),
+      gone: z.boolean().optional().describe('With selector: wait until it is ABSENT instead of present.'),
+      timeoutMs: z.number().optional().describe('Default 10000. Keep ≤ 30000.'),
+      tabId: z.number().optional(),
+    },
+  },
+  async ({ selector, text, gone, timeoutMs, tabId }) =>
+    out(await call('wait_for', { selector, text, gone, timeoutMs, tabId }, (timeoutMs || 10000) + 5000)));
+
+server.registerTool('console_capture',
+  {
+    description:
+      'Record a tab\'s console output and uncaught errors — the console analogue of network_capture, no ' +
+      'banner. action:"start" installs a MAIN-world hook and clears the buffer; action:"stop" returns ' +
+      'the buffered {level, text, t} entries and drains them. The hook is lost on full page navigation ' +
+      '(re-start after navigating).',
+    inputSchema: {
+      action: z.enum(['start', 'stop']),
+      tabId: z.number().optional(),
+    },
+  },
+  async ({ action, tabId }) => out(await call('console_capture', { action, tabId })));
+
+server.registerTool('cookies',
+  {
+    description:
+      'Read cookies (including httpOnly ones exec can\'t see) for a tab\'s URL or an explicit url. ' +
+      'Returns {name, value, domain, path, secure, httpOnly, session, expires}. Read-only.',
+    inputSchema: {
+      tabId: z.number().optional().describe('Read cookies for this tab\'s URL. Omit to use the active tab.'),
+      url: z.string().optional().describe('Explicit URL to read cookies for (overrides tabId).'),
+    },
+  },
+  async ({ tabId, url }) => out(await call('cookies', { tabId, url })));
 
 server.registerTool('navigate',
   {
