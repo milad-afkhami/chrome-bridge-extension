@@ -61,10 +61,17 @@ setInterval(() => {
   if (!ws || ws.readyState === WebSocket.CLOSED) connect();
 }, 5000);
 
-async function activeTabId() {
-  const [t] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!t) throw new Error('No active tab found');
-  return t.id;
+// Design rule: tab-targeting tools NEVER fall back to your focused tab. A call
+// must name its tabId — from list_tabs (drive an existing tab) or open_tab (start
+// fresh). This makes it impossible for a session to hijack the page you're on.
+function requireTab(p) {
+  if (p.tabId == null) {
+    throw new Error(
+      'tabId is required — call list_tabs to pick an existing tab, or open_tab to ' +
+      'start a fresh one. This bridge never falls back to your focused tab.'
+    );
+  }
+  return p.tabId;
 }
 
 // ---- network capture (webRequest; no banner, no response bodies) ----
@@ -92,7 +99,7 @@ try {
   chrome.webRequest.onErrorOccurred.addListener(netErr, { urls: ['<all_urls>'] });
 } catch (e) { console.warn('[chrome-bridge] webRequest unavailable', e); }
 
-// ---- debugger helper (only used by upload_file) ----
+// ---- debugger helpers (upload_file, exec viaDebugger, network_capture bodies) ----
 function dbg(target, method, params) {
   return new Promise((resolve, reject) => {
     chrome.debugger.sendCommand(target, method, params || {}, (res) => {
@@ -101,6 +108,61 @@ function dbg(target, method, params) {
     });
   });
 }
+// Refcount attach so several features can share one debugger session on a tab
+// without detaching out from under each other (e.g. exec while a body capture runs).
+const dbgRefs = new Map(); // tabId -> attach count
+async function dbgAttach(tabId) {
+  const n = dbgRefs.get(tabId) || 0;
+  if (n === 0) await chrome.debugger.attach({ tabId }, '1.3');
+  dbgRefs.set(tabId, n + 1);
+}
+async function dbgDetach(tabId) {
+  const n = dbgRefs.get(tabId) || 0;
+  if (n <= 1) { dbgRefs.delete(tabId); try { await chrome.debugger.detach({ tabId }); } catch {} }
+  else dbgRefs.set(tabId, n - 1);
+}
+
+// ---- debugger-based network capture WITH response bodies (one tab; shows the banner) ----
+const NET_MAX = 100;              // cap requests kept per capture
+const NET_BODY_CAP = 64 * 1024;   // cap each captured body (chars)
+let dbgNet = null; // { tabId, reqs: Map<requestId, rec>, order: string[] } while capturing bodies
+function onNetEvent(source, method, params) {
+  const S = dbgNet;
+  if (!S || source.tabId !== S.tabId) return;
+  if (method === 'Network.requestWillBeSent') {
+    if (!S.reqs.has(params.requestId) && S.reqs.size >= NET_MAX) return;
+    S.reqs.set(params.requestId, {
+      url: params.request.url, method: params.request.method,
+      type: params.type, started: params.timestamp,
+    });
+    S.order.push(params.requestId);
+  } else if (method === 'Network.responseReceived') {
+    const r = S.reqs.get(params.requestId);
+    if (r) { r.status = params.response.status; r.mimeType = params.response.mimeType; if (params.type) r.type = params.type; }
+  } else if (method === 'Network.loadingFinished') {
+    const r = S.reqs.get(params.requestId);
+    if (!r || r._bodyDone) return;
+    r._bodyDone = true;
+    chrome.debugger.sendCommand({ tabId: S.tabId }, 'Network.getResponseBody', { requestId: params.requestId }, (res) => {
+      if (chrome.runtime.lastError || !res) { r.bodyError = (chrome.runtime.lastError && chrome.runtime.lastError.message) || 'no body'; return; }
+      const body = res.body || '';
+      r.base64Encoded = !!res.base64Encoded;
+      r.bodyBytes = body.length;
+      r.bodyTruncated = body.length > NET_BODY_CAP;
+      r.body = r.bodyTruncated ? body.slice(0, NET_BODY_CAP) : body;
+    });
+  } else if (method === 'Network.loadingFailed') {
+    const r = S.reqs.get(params.requestId);
+    if (r) r.error = params.errorText;
+  }
+}
+chrome.debugger.onEvent.addListener(onNetEvent);
+// If the user cancels the debugger banner (or the tab closes), forget that tab's state.
+chrome.debugger.onDetach.addListener((source) => {
+  if (source.tabId == null) return;
+  dbgRefs.delete(source.tabId);
+  if (dbgNet && dbgNet.tabId === source.tabId) dbgNet = null;
+});
 
 async function handle(action, p) {
   lastAction = action;
@@ -114,14 +176,36 @@ async function handle(action, p) {
     }
 
     case 'navigate': {
-      const tabId = p.tabId ?? (await activeTabId());
+      const tabId = requireTab(p);
       // No { active: true } → tab updates in place without being focused/raised.
       await chrome.tabs.update(tabId, { url: p.url });
       return { ok: true, tabId, url: p.url };
     }
 
     case 'exec': {
-      const tabId = p.tabId ?? (await activeTabId());
+      const tabId = requireTab(p);
+      // Opt-in path for strict-CSP pages (GitHub, Google, some banks): the page's
+      // CSP forbids MAIN-world new Function, but the DevTools protocol's Runtime.evaluate
+      // is not subject to it. Costs the "debugging this browser" banner for the call.
+      if (p.viaDebugger) {
+        await dbgAttach(tabId);
+        try {
+          const r = await dbg({ tabId }, 'Runtime.evaluate', {
+            expression: '(async () => {\n' + String(p.code) + '\n})()',
+            awaitPromise: true,
+            returnByValue: true,
+            userGesture: false,
+          });
+          if (r && r.exceptionDetails) {
+            const ex = r.exceptionDetails;
+            const msg = (ex.exception && (ex.exception.description || ex.exception.value)) || ex.text || 'exec error';
+            throw new Error(String(msg));
+          }
+          return r && r.result ? r.result.value : undefined;
+        } finally {
+          await dbgDetach(tabId);
+        }
+      }
       const [res] = await chrome.scripting.executeScript({
         target: { tabId },
         world: 'MAIN',
@@ -136,7 +220,7 @@ async function handle(action, p) {
     }
 
     case 'read': {
-      const tabId = p.tabId ?? (await activeTabId());
+      const tabId = requireTab(p);
       const format = p.format || (p.html ? 'html' : 'text');
       const [res] = await chrome.scripting.executeScript({
         target: { tabId },
@@ -186,7 +270,7 @@ async function handle(action, p) {
     }
 
     case 'snapshot': {
-      const tabId = p.tabId ?? (await activeTabId());
+      const tabId = requireTab(p);
       const [res] = await chrome.scripting.executeScript({
         target: { tabId },
         world: 'MAIN',
@@ -290,7 +374,7 @@ async function handle(action, p) {
     }
 
     case 'click': {
-      const tabId = p.tabId ?? (await activeTabId());
+      const tabId = requireTab(p);
       const [res] = await chrome.scripting.executeScript({
         target: { tabId },
         world: 'MAIN',
@@ -309,7 +393,7 @@ async function handle(action, p) {
     }
 
     case 'fill': {
-      const tabId = p.tabId ?? (await activeTabId());
+      const tabId = requireTab(p);
       const [res] = await chrome.scripting.executeScript({
         target: { tabId },
         world: 'MAIN',
@@ -344,7 +428,7 @@ async function handle(action, p) {
     }
 
     case 'hover': {
-      const tabId = p.tabId ?? (await activeTabId());
+      const tabId = requireTab(p);
       const [res] = await chrome.scripting.executeScript({
         target: { tabId },
         world: 'MAIN',
@@ -368,7 +452,7 @@ async function handle(action, p) {
     }
 
     case 'wait_for': {
-      const tabId = p.tabId ?? (await activeTabId());
+      const tabId = requireTab(p);
       const timeoutMs = p.timeoutMs || 10000;
       const start = Date.now();
       const check = async () => {
@@ -396,7 +480,7 @@ async function handle(action, p) {
     }
 
     case 'console_capture': {
-      const tabId = p.tabId ?? (await activeTabId());
+      const tabId = requireTab(p);
       if (p.action === 'start') {
         await chrome.scripting.executeScript({
           target: { tabId },
@@ -435,7 +519,7 @@ async function handle(action, p) {
     case 'cookies': {
       let url = p.url;
       if (!url) {
-        const tabId = p.tabId ?? (await activeTabId());
+        const tabId = requireTab(p);
         const tab = await chrome.tabs.get(tabId);
         url = tab.url;
       }
@@ -463,7 +547,7 @@ async function handle(action, p) {
     }
 
     case 'screenshot': {
-      const tabId = p.tabId ?? (await activeTabId());
+      const tabId = requireTab(p);
       const tab = await chrome.tabs.get(tabId);
       const [prev] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
       const flash = !tab.active; // only touch focus if we must render a background tab
@@ -474,9 +558,9 @@ async function handle(action, p) {
     }
 
     case 'upload_file': {
-      const tabId = p.tabId ?? (await activeTabId());
+      const tabId = requireTab(p);
       const target = { tabId };
-      await chrome.debugger.attach(target, '1.3');
+      await dbgAttach(tabId);
       try {
         const doc = await dbg(target, 'DOM.getDocument', { depth: -1 });
         const found = await dbg(target, 'DOM.querySelector', { nodeId: doc.root.nodeId, selector: p.selector });
@@ -484,18 +568,57 @@ async function handle(action, p) {
         await dbg(target, 'DOM.setFileInputFiles', { nodeId: found.nodeId, files: p.filePaths });
         return { ok: true, files: p.filePaths };
       } finally {
-        try { await chrome.debugger.detach(target); } catch {}
+        await dbgDetach(tabId);
       }
     }
 
     case 'network_capture': {
       if (p.action === 'start') {
+        if (p.bodies) {
+          // Response bodies need the debugger's Network domain, which targets ONE tab.
+          if (p.tabId == null) throw new Error('network_capture bodies:true requires a tabId (the debugger targets one tab)');
+          if (dbgNet) throw new Error('a body capture is already running on tab ' + dbgNet.tabId + '; stop it first');
+          await dbgAttach(p.tabId);
+          try { await dbg({ tabId: p.tabId }, 'Network.enable', {}); }
+          catch (e) { await dbgDetach(p.tabId); throw e; }
+          dbgNet = { tabId: p.tabId, reqs: new Map(), order: [] };
+          return { ok: true, capturing: true, tabId: p.tabId, bodies: true };
+        }
         capturing = true; captureTabId = p.tabId ?? null; captured = []; inflight.clear();
         return { ok: true, capturing: true, tabId: captureTabId };
+      }
+      // stop
+      if (dbgNet) {
+        const S = dbgNet;
+        // Let any in-flight getResponseBody callbacks settle before we read them.
+        await new Promise((r) => setTimeout(r, 200));
+        dbgNet = null;
+        try { await dbg({ tabId: S.tabId }, 'Network.disable', {}); } catch {}
+        await dbgDetach(S.tabId);
+        const requests = S.order.map((id) => {
+          const r = S.reqs.get(id);
+          if (!r) return null;
+          const { started, _bodyDone, ...rest } = r;
+          return rest;
+        }).filter(Boolean);
+        return { count: requests.length, bodies: true, tabId: S.tabId, requests };
       }
       capturing = false;
       const requests = captured; captured = []; inflight.clear();
       return { count: requests.length, requests };
+    }
+
+    case 'ping': {
+      const tabs = await chrome.tabs.query({});
+      return {
+        pong: true,
+        version: chrome.runtime.getManifest().version,
+        connectedSince, commandCount, lastAction, lastActionAt,
+        tabCount: tabs.length,
+        debuggerTabs: [...dbgRefs.keys()],
+        bodyCaptureTab: dbgNet ? dbgNet.tabId : null,
+        now: Date.now(),
+      };
     }
 
     default:

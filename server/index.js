@@ -122,7 +122,27 @@ function call(action, params = {}, timeoutMs = 30000) {
 const out = (data) => ({ content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data, null, 2) }] });
 
 // ---------------- MCP server + tools ----------------
-const server = new McpServer({ name: 'chrome-bridge', version: '0.3.0' });
+const server = new McpServer({ name: 'chrome-bridge', version: '0.4.0' });
+
+server.registerTool('ping',
+  {
+    description:
+      'Health check for the bridge — never throws. Returns {ok, server:{role,port}, extension:{...}}. ' +
+      'If the extension is connected it round-trips to it and reports {pong, version, connectedSince, ' +
+      'commandCount, lastAction, tabCount, now}; if not, ok:false and extension.connected:false with ' +
+      'the reason. Use this to confirm the extension is live before driving a page (and to tell ' +
+      '"server up, extension down" apart from a real failure).',
+    inputSchema: {},
+  },
+  async () => {
+    const serverInfo = { role, port: PORT };
+    try {
+      const ext = await call('ping', {}, 5000);
+      return out({ ok: true, server: serverInfo, extension: ext });
+    } catch (e) {
+      return out({ ok: false, server: serverInfo, extension: { connected: false, error: String((e && e.message) || e) } });
+    }
+  });
 
 server.registerTool('list_tabs',
   { description: 'List open browser tabs as [{tabId, url, title, active}]. Read-only; never changes focus.', inputSchema: {} },
@@ -134,13 +154,17 @@ server.registerTool('exec',
       'Run JavaScript in a tab and return its value (must be JSON-serializable). Runs in the page ' +
       'MAIN world via chrome.scripting — no debugger banner, and does NOT focus or raise the tab. ' +
       'The code is an async function body: use `return ...` and top-level `await`. ' +
-      'Note: pages with a strict Content-Security-Policy can block eval-based exec (rare).',
+      'If a page\'s strict Content-Security-Policy blocks the default eval-based exec (symptom: null ' +
+      'on GitHub/Google/some banks), set viaDebugger:true to run it through the DevTools protocol ' +
+      '(Runtime.evaluate), which CSP does not restrict — at the cost of briefly showing the ' +
+      '"debugging this browser" banner.',
     inputSchema: {
       code: z.string().describe('JavaScript to run, e.g. "return document.title" or "document.querySelector(\'#x\').click()"'),
-      tabId: z.number().optional().describe('Target tab id from list_tabs. Omit to use the active tab.'),
+      tabId: z.number().describe('Target tab id from list_tabs (required).'),
+      viaDebugger: z.boolean().optional().describe('Run via the debugger (Runtime.evaluate) to bypass strict CSP. Shows the debugging banner briefly.'),
     },
   },
-  async ({ code, tabId }) => out(await call('exec', { code, tabId })));
+  async ({ code, tabId, viaDebugger }) => out(await call('exec', { code, tabId, viaDebugger }, viaDebugger ? 60000 : 30000)));
 
 server.registerTool('read',
   {
@@ -150,7 +174,7 @@ server.registerTool('read',
       'lists, code) — great for reading an article without HTML bloat. Optional CSS selector to read a ' +
       'single element instead of the whole document. Works everywhere incl. strict-CSP sites (no eval).',
     inputSchema: {
-      tabId: z.number().optional().describe('Target tab id. Omit to use the active tab.'),
+      tabId: z.number().describe('Target tab id from list_tabs (required).'),
       selector: z.string().optional().describe('CSS selector; omit for the whole document.'),
       format: z.enum(['text', 'html', 'markdown']).optional().describe('text (default) | html | markdown.'),
       html: z.boolean().optional().describe('Deprecated alias for format:"html".'),
@@ -168,7 +192,7 @@ server.registerTool('snapshot',
       '(no eval) so it works even on strict-CSP sites where exec is blocked. interactiveOnly:false also ' +
       'includes headings/landmarks for reading structure.',
     inputSchema: {
-      tabId: z.number().optional().describe('Target tab id. Omit to use the active tab.'),
+      tabId: z.number().describe('Target tab id from list_tabs (required).'),
       selector: z.string().optional().describe('Limit the snapshot to this container (CSS selector).'),
       interactiveOnly: z.boolean().optional().describe('Default true. false = also list headings/landmarks.'),
     },
@@ -183,7 +207,7 @@ server.registerTool('click',
     inputSchema: {
       ref: z.string().optional().describe('A ref from snapshot, e.g. "e7".'),
       selector: z.string().optional().describe('CSS selector (use if you have no ref).'),
-      tabId: z.number().optional(),
+      tabId: z.number().describe('Target tab id from list_tabs (required).'),
     },
   },
   async ({ ref, selector, tabId }) => out(await call('click', { ref, selector, tabId })));
@@ -199,7 +223,7 @@ server.registerTool('fill',
       ref: z.string().optional().describe('A ref from snapshot, e.g. "e12".'),
       selector: z.string().optional().describe('CSS selector (use if you have no ref).'),
       submit: z.boolean().optional().describe('Press Enter / submit the form after filling.'),
-      tabId: z.number().optional(),
+      tabId: z.number().describe('Target tab id from list_tabs (required).'),
     },
   },
   async ({ value, ref, selector, submit, tabId }) => out(await call('fill', { value, ref, selector, submit, tabId })));
@@ -212,7 +236,7 @@ server.registerTool('hover',
     inputSchema: {
       ref: z.string().optional().describe('A ref from snapshot.'),
       selector: z.string().optional().describe('CSS selector.'),
-      tabId: z.number().optional(),
+      tabId: z.number().describe('Target tab id from list_tabs (required).'),
     },
   },
   async ({ ref, selector, tabId }) => out(await call('hover', { ref, selector, tabId })));
@@ -229,7 +253,7 @@ server.registerTool('wait_for',
       text: z.string().optional().describe('Substring of visible text to wait for.'),
       gone: z.boolean().optional().describe('With selector: wait until it is ABSENT instead of present.'),
       timeoutMs: z.number().optional().describe('Default 10000. Keep ≤ 30000.'),
-      tabId: z.number().optional(),
+      tabId: z.number().describe('Target tab id from list_tabs (required).'),
     },
   },
   async ({ selector, text, gone, timeoutMs, tabId }) =>
@@ -244,7 +268,7 @@ server.registerTool('console_capture',
       '(re-start after navigating).',
     inputSchema: {
       action: z.enum(['start', 'stop']),
-      tabId: z.number().optional(),
+      tabId: z.number().describe('Target tab id from list_tabs (required).'),
     },
   },
   async ({ action, tabId }) => out(await call('console_capture', { action, tabId })));
@@ -255,7 +279,7 @@ server.registerTool('cookies',
       'Read cookies (including httpOnly ones exec can\'t see) for a tab\'s URL or an explicit url. ' +
       'Returns {name, value, domain, path, secure, httpOnly, session, expires}. Read-only.',
     inputSchema: {
-      tabId: z.number().optional().describe('Read cookies for this tab\'s URL. Omit to use the active tab.'),
+      tabId: z.number().optional().describe('Read cookies for this tab\'s URL. Provide this or url.'),
       url: z.string().optional().describe('Explicit URL to read cookies for (overrides tabId).'),
     },
   },
@@ -263,8 +287,8 @@ server.registerTool('cookies',
 
 server.registerTool('navigate',
   {
-    description: 'Navigate a tab to a URL in the background (does not focus/raise it). Omit tabId to use the active tab.',
-    inputSchema: { url: z.string(), tabId: z.number().optional() },
+    description: 'Navigate a tab to a URL in the background (does not focus/raise it). Requires a tabId — use list_tabs to target an existing tab, or open_tab to start fresh. Never touches your focused tab.',
+    inputSchema: { url: z.string(), tabId: z.number().describe('Target tab id from list_tabs or open_tab (required).') },
   },
   async ({ url, tabId }) => out(await call('navigate', { url, tabId })));
 
@@ -291,11 +315,10 @@ server.registerTool('close_tab',
 server.registerTool('screenshot',
   {
     description:
-      'Capture a PNG of a tab and return it as an image. No tabId → captures the currently visible ' +
-      'tab (zero disturbance). With a tabId that is not frontmost, the tab is briefly flashed to the ' +
-      'front to render, then the previous tab is restored (a short flicker — the only tool that ' +
-      'touches focus, and only for a moment).',
-    inputSchema: { tabId: z.number().optional() },
+      'Capture a PNG of a tab and return it as an image. Requires a tabId (from list_tabs). If that ' +
+      'tab is not frontmost, it is briefly flashed to the front to render, then the previous tab is ' +
+      'restored (a short flicker — the only tool that touches focus, and only for a moment).',
+    inputSchema: { tabId: z.number().describe('Target tab id from list_tabs (required).') },
   },
   async ({ tabId }) => {
     const r = await call('screenshot', { tabId });
@@ -314,7 +337,7 @@ server.registerTool('upload_file',
     inputSchema: {
       selector: z.string().describe('CSS selector of the <input type="file">.'),
       filePaths: z.array(z.string()).describe('Absolute paths, e.g. ["/home/milad/x.pdf"].'),
-      tabId: z.number().optional(),
+      tabId: z.number().describe('Target tab id from list_tabs (required).'),
     },
   },
   async ({ selector, filePaths, tabId }) => out(await call('upload_file', { selector, filePaths, tabId }, 60000)));
@@ -324,14 +347,19 @@ server.registerTool('network_capture',
     description:
       'Record network requests (URL, method, resource type, status, timing) via the webRequest API ' +
       '— no banner. action:"start" begins buffering (optionally filtered to one tabId); ' +
-      'action:"stop" returns the buffered requests and clears the buffer. Response BODIES are not ' +
-      'captured (that needs the debugger) — use exec+fetch if you need a body.',
+      'action:"stop" returns the buffered requests and clears the buffer. ' +
+      'Set bodies:true on start to ALSO capture response bodies via the debugger (Network domain): ' +
+      'this REQUIRES a tabId (the debugger targets one tab), shows the "debugging this browser" ' +
+      'banner for the capture, and returns each request with {status, mimeType, body, base64Encoded, ' +
+      'bodyBytes, bodyTruncated} (bodies capped at 64KB each, 100 requests). Without bodies, prefer ' +
+      'the default webRequest path (no banner, all tabs).',
     inputSchema: {
       action: z.enum(['start', 'stop']),
-      tabId: z.number().optional().describe('On start: capture only this tab. Omit for all tabs.'),
+      tabId: z.number().optional().describe('On start: capture only this tab. Required when bodies:true.'),
+      bodies: z.boolean().optional().describe('Capture response bodies via the debugger (needs tabId; shows the banner).'),
     },
   },
-  async ({ action, tabId }) => out(await call('network_capture', { action, tabId })));
+  async ({ action, tabId, bodies }) => out(await call('network_capture', { action, tabId, bodies }, 60000)));
 
 // Start the bridge, then connect MCP.
 startHub();

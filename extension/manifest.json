@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Chrome Bridge (MCP)",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Minimal local bridge: exposes read/exec/snapshot/click/navigate over a localhost WebSocket for Claude Code MCP. Never steals focus.",
   "permissions": ["tabs", "scripting", "alarms", "webRequest", "debugger", "storage", "cookies"],
   "host_permissions": ["<all_urls>"],
