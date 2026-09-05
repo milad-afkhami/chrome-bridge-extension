@@ -79,7 +79,7 @@ try {
   const hit = withBody.find((r) => /Example Domain/i.test(r.body));
   check('captured a response body', withBody.length > 0);
   check('a captured body has real content (Example Domain)', !!hit, 'sample: ' + JSON.stringify(withBody[0])?.slice(0, 160));
-  check('body records status + mimeType', withBody[0]?.status === 200 && /html/.test(withBody[0]?.mimeType || ''));
+  check('the document body records status + mimeType', hit?.status === 200 && /html/.test(hit?.mimeType || ''), 'hit: ' + JSON.stringify(hit && { status: hit.status, mimeType: hit.mimeType, bodyBytes: hit.bodyBytes }));
 
   // bodies:true without tabId must be rejected (guard)
   console.log('\n4. guards:');
