@@ -1,0 +1,27 @@
+#!/bin/sh
+# Pre-push gate: run the hermetic server integration test before allowing a push.
+# The test spins up the real MCP server with a FAKE extension on a throwaway port,
+# so it needs Node but NOT Chrome — safe to run on every push.
+#
+# Enabled via:  git config core.hooksPath .githooks   (run once per clone)
+# Emergency bypass:  git push --no-verify
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "[pre-push] node not found — skipping integration test"
+  exit 0
+fi
+if [ ! -d server/node_modules/@modelcontextprotocol ]; then
+  echo "[pre-push] server deps not installed (run: npm --prefix server install) — skipping integration test"
+  exit 0
+fi
+
+echo "[pre-push] running server integration test…"
+out=$(node server/test/integration.mjs 2>&1)
+status=$?
+if [ "$status" -ne 0 ]; then
+  echo "$out"
+  echo "[pre-push] ❌ integration test FAILED — push aborted (override: git push --no-verify)"
+  exit 1
+fi
+echo "[pre-push] ✅ server integration test passed"
+exit 0
