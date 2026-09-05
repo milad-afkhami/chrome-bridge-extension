@@ -1,0 +1,12 @@
+{
+  "name": "chrome-bridge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prepare": "husky",
+    "test": "node server/test/integration.mjs"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7"
+  }
+}

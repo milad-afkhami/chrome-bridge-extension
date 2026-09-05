@@ -3,10 +3,6 @@
   "version": "0.1.0",
   "type": "module",
   "bin": { "chrome-bridge": "index.js" },
-  "scripts": {
-    "test": "node test/integration.mjs",
-    "prepare": "node scripts/arm-hooks.mjs"
-  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
     "ws": "^8.18.0"
