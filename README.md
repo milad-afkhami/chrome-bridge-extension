@@ -1,6 +1,6 @@
 # Chrome Bridge (MCP)
 
-Let Claude Code drive your **real, everyday Chrome** — read pages, run JavaScript, navigate, screenshot,
+Let **Claude Code or Codex** drive your **real, everyday Chrome** — read pages, run JavaScript, navigate, screenshot,
 capture network, upload files, open/close tabs — **without stealing window focus** and (almost entirely)
 **without a debugger banner**.
 
@@ -8,8 +8,9 @@ Two parts:
 - `extension/` — an MV3 Chrome extension that auto-connects to a localhost WebSocket and executes
   commands. Reads/execs via `chrome.scripting` (MAIN world). Operates on any tab by `tabId`; never
   activates/raises a tab (the one exception: `screenshot` of a *background* tab briefly flashes it).
-- `server/` — an MCP stdio server (Node) that Claude Code spawns; it relays tool calls to the extension
-  over `ws://127.0.0.1:9223`.
+- `server/` — a standard MCP **stdio** server (Node) that your agent (Claude Code or Codex) spawns; it
+  relays tool calls to the extension over `ws://127.0.0.1:9223`. Nothing in it is agent-specific — any
+  MCP-over-stdio client works; Claude Code and Codex are the two that are wired up and tested.
 
 ## Tools (16)
 
@@ -69,11 +70,32 @@ you're working in.
 cd server && npm install
 ```
 
-**2. Register with Claude Code** (run from the repo root; user scope = every project)
+**2. Register with your agent** (run from the repo root)
+
+*Claude Code* (user scope = every project):
 ```
 claude mcp add --scope user chrome-bridge -- node "$(pwd)/server/index.js"
 ```
 Restart Claude Code (`claude --continue`) so the tools load (MCP servers load at startup).
+
+*Codex* — same server, registered in `~/.codex/config.toml`:
+```
+codex mcp add chrome-bridge -- node "$(pwd)/server/index.js"
+```
+(equivalently, add by hand:)
+```toml
+[mcp_servers.chrome-bridge]
+command = "node"
+args = ["/absolute/path/to/chrome-bridge/server/index.js"]
+```
+Start a fresh Codex session so it spawns the server. Verify with `codex mcp list` (shows
+`chrome-bridge … enabled`) — the `Auth: Unsupported` column just means it's a local stdio server
+with no OAuth, which is expected.
+
+**Both at once is fine.** If Claude Code and Codex run together, each spawns its own copy of the
+server; the first to bind port `9223` becomes the **hub** (owns the single extension link) and the
+rest become **controllers** that forward over the same port (see *Architecture* below). So the two
+agents cooperate on one browser instead of fighting over it.
 
 **3. Load the extension in your real Chrome**
 - `chrome://extensions` → Developer mode → **Load unpacked** → select this repo's `extension/` folder.
