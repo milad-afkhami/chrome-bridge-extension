@@ -192,7 +192,9 @@ chrome.debugger.onDetach.addListener((source) => {
 // key -> CDP key event fields for the common non-printable keys. Single characters
 // fall back to typing the char itself (see press_key).
 const KEY_TABLE = {
-  Enter: { code: 'Enter', keyCode: 13 },
+  // Enter carries text '\r' so it dispatches as keyDown (with a keypress), which is
+  // what triggers a form's implicit submission / newline — rawKeyDown alone doesn't.
+  Enter: { code: 'Enter', keyCode: 13, text: '\r' },
   Tab: { code: 'Tab', keyCode: 9 },
   Escape: { code: 'Escape', keyCode: 27 },
   Backspace: { code: 'Backspace', keyCode: 8 },
