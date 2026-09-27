@@ -79,16 +79,36 @@ let capturing = false;
 let captureTabId = null;
 let captured = [];
 const inflight = new Map();
+// Always-on (independent of `capturing`) per-tab in-flight request tracking, so
+// wait_for {networkIdle:true} can tell when a page has settled without a capture.
+const netInflight = new Map(); // tabId -> Set<requestId>
+const netLastActivity = new Map(); // tabId -> timestamp of last start/end
+function netTrackStart(d) {
+  if (d.tabId == null || d.tabId < 0) return;
+  let set = netInflight.get(d.tabId);
+  if (!set) { set = new Set(); netInflight.set(d.tabId, set); }
+  set.add(d.requestId);
+  netLastActivity.set(d.tabId, Date.now());
+}
+function netTrackEnd(d) {
+  if (d.tabId == null || d.tabId < 0) return;
+  const set = netInflight.get(d.tabId);
+  if (set) { set.delete(d.requestId); if (set.size === 0) netInflight.delete(d.tabId); }
+  netLastActivity.set(d.tabId, Date.now());
+}
 function netStart(d) {
+  netTrackStart(d);
   if (!capturing || (captureTabId != null && d.tabId !== captureTabId)) return;
   inflight.set(d.requestId, { url: d.url, method: d.method, type: d.type, tabId: d.tabId, started: d.timeStamp });
 }
 function netDone(d) {
+  netTrackEnd(d);
   if (!capturing) return;
   const r = inflight.get(d.requestId); inflight.delete(d.requestId);
   if (r) captured.push({ ...r, status: d.statusCode, fromCache: d.fromCache, ms: Math.round(d.timeStamp - r.started) });
 }
 function netErr(d) {
+  netTrackEnd(d);
   if (!capturing) return;
   const r = inflight.get(d.requestId); inflight.delete(d.requestId);
   if (r) captured.push({ ...r, error: d.error, ms: Math.round(d.timeStamp - r.started) });
@@ -157,12 +177,37 @@ function onNetEvent(source, method, params) {
   }
 }
 chrome.debugger.onEvent.addListener(onNetEvent);
+// Held CDP overrides that persist while the debugger stays attached (emulate_media).
+// Tracked so we don't stack refcounts on repeat calls and can release on reset.
+const mediaEmu = new Set(); // tabIds with a held setEmulatedMedia override
+
 // If the user cancels the debugger banner (or the tab closes), forget that tab's state.
 chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId == null) return;
   dbgRefs.delete(source.tabId);
+  mediaEmu.delete(source.tabId);
   if (dbgNet && dbgNet.tabId === source.tabId) dbgNet = null;
 });
+
+// key -> CDP key event fields for the common non-printable keys. Single characters
+// fall back to typing the char itself (see press_key).
+const KEY_TABLE = {
+  Enter: { code: 'Enter', keyCode: 13 },
+  Tab: { code: 'Tab', keyCode: 9 },
+  Escape: { code: 'Escape', keyCode: 27 },
+  Backspace: { code: 'Backspace', keyCode: 8 },
+  Delete: { code: 'Delete', keyCode: 46 },
+  ArrowUp: { code: 'ArrowUp', keyCode: 38 },
+  ArrowDown: { code: 'ArrowDown', keyCode: 40 },
+  ArrowLeft: { code: 'ArrowLeft', keyCode: 37 },
+  ArrowRight: { code: 'ArrowRight', keyCode: 39 },
+  Home: { code: 'Home', keyCode: 36 },
+  End: { code: 'End', keyCode: 35 },
+  PageUp: { code: 'PageUp', keyCode: 33 },
+  PageDown: { code: 'PageDown', keyCode: 34 },
+  Space: { code: 'Space', keyCode: 32, text: ' ' },
+};
+const KEY_MODIFIER_BITS = { Alt: 1, Control: 2, Meta: 4, Shift: 8 };
 
 async function handle(action, p) {
   lastAction = action;
@@ -455,6 +500,18 @@ async function handle(action, p) {
       const tabId = requireTab(p);
       const timeoutMs = p.timeoutMs || 10000;
       const start = Date.now();
+      if (p.networkIdle) {
+        // Settle: no in-flight requests for this tab for `idleMs` of quiet.
+        const idleMs = p.idleMs || 500;
+        while (Date.now() - start < timeoutMs) {
+          const set = netInflight.get(tabId);
+          const inFlight = set ? set.size : 0;
+          const last = netLastActivity.get(tabId) || 0;
+          if (inFlight === 0 && Date.now() - last >= idleMs) return { ok: true, waitedMs: Date.now() - start };
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        throw new Error('wait_for networkIdle timed out after ' + timeoutMs + 'ms');
+      }
       const check = async () => {
         try {
           const [r] = await chrome.scripting.executeScript({
@@ -548,6 +605,43 @@ async function handle(action, p) {
 
     case 'screenshot': {
       const tabId = requireTab(p);
+      // CDP path: render off-screen at a controlled viewport and/or clip to one element.
+      // No focus change and no real-window resize (unlike captureVisibleTab below).
+      const emulate = p.width && p.height;
+      if (emulate || p.selector) {
+        await dbgAttach(tabId);
+        try {
+          if (emulate) {
+            await dbg({ tabId }, 'Emulation.setDeviceMetricsOverride', {
+              width: p.width, height: p.height,
+              deviceScaleFactor: p.deviceScaleFactor ?? 2,
+              mobile: p.mobile ?? true,
+            });
+          }
+          const shotParams = { format: 'png', captureBeyondViewport: !!p.fullPage };
+          if (p.selector) {
+            // Measure the element (in the emulated layout, if any) to clip the capture.
+            const r = await dbg({ tabId }, 'Runtime.evaluate', {
+              expression:
+                '(() => { const el = document.querySelector(' + JSON.stringify(p.selector) + ');' +
+                ' if (!el) return null; el.scrollIntoView({ block: "center", inline: "center" });' +
+                ' const b = el.getBoundingClientRect();' +
+                ' return { x: b.left + window.scrollX, y: b.top + window.scrollY, width: b.width, height: b.height }; })()',
+              returnByValue: true,
+            });
+            const box = r && r.result && r.result.value;
+            if (!box) throw new Error('screenshot: element not found: ' + p.selector);
+            if (box.width < 1 || box.height < 1) throw new Error('screenshot: element has zero size: ' + p.selector);
+            shotParams.clip = { x: box.x, y: box.y, width: box.width, height: box.height, scale: 1 };
+            shotParams.captureBeyondViewport = true; // element may be outside the current viewport
+          }
+          const { data } = await dbg({ tabId }, 'Page.captureScreenshot', shotParams);
+          return { dataUrl: 'data:image/png;base64,' + data };
+        } finally {
+          if (emulate) await dbg({ tabId }, 'Emulation.clearDeviceMetricsOverride').catch(() => {});
+          await dbgDetach(tabId);
+        }
+      }
       const tab = await chrome.tabs.get(tabId);
       const [prev] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
       const flash = !tab.active; // only touch focus if we must render a background tab
@@ -555,6 +649,102 @@ async function handle(action, p) {
       const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
       if (flash && prev) await chrome.tabs.update(prev.id, { active: true });
       return { dataUrl };
+    }
+
+    case 'press_key': {
+      const tabId = requireTab(p);
+      const key = p.key;
+      if (!key || typeof key !== 'string') throw new Error('press_key: key is required (e.g. "Enter", "Escape", "a").');
+      const mods = Array.isArray(p.modifiers) ? p.modifiers : [];
+      let modifiers = 0;
+      for (const m of mods) {
+        if (!(m in KEY_MODIFIER_BITS)) throw new Error('press_key: unknown modifier "' + m + '" (use Alt|Control|Meta|Shift).');
+        modifiers |= KEY_MODIFIER_BITS[m];
+      }
+      const known = KEY_TABLE[key];
+      // Single printable char (no named key): type it as text; else use the table.
+      const printable = !known && key.length === 1;
+      const code = known ? known.code : (printable ? 'Key' + key.toUpperCase() : key);
+      const keyCode = known ? known.keyCode : (printable ? key.toUpperCase().charCodeAt(0) : 0);
+      // A char is emitted for printable keys (and Space) unless a non-Shift modifier is held.
+      const hasNonShift = mods.some((m) => m !== 'Shift');
+      const text = known ? known.text : (printable ? key : undefined);
+      await dbgAttach(tabId);
+      try {
+        if (p.selector) {
+          const r = await dbg({ tabId }, 'Runtime.evaluate', {
+            expression: '(() => { const el = document.querySelector(' + JSON.stringify(p.selector) + '); if (!el) return false; el.focus(); return true; })()',
+            returnByValue: true,
+          });
+          if (!(r && r.result && r.result.value)) throw new Error('press_key: element not found to focus: ' + p.selector);
+        }
+        const base = { modifiers, key, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode };
+        await dbg({ tabId }, 'Input.dispatchKeyEvent', {
+          type: (text && !hasNonShift) ? 'keyDown' : 'rawKeyDown',
+          ...base, ...(text && !hasNonShift ? { text } : {}),
+        });
+        await dbg({ tabId }, 'Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+        return { ok: true, key };
+      } finally {
+        await dbgDetach(tabId);
+      }
+    }
+
+    case 'select': {
+      const tabId = requireTab(p);
+      const [res] = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        args: [p.ref || null, p.selector || null, p.value ?? null, p.label ?? null, p.index ?? null],
+        func: (ref, selector, value, label, index) => {
+          const sel = ref ? '[data-cb-ref="' + ref + '"]' : selector;
+          if (!sel) return { ok: false, error: 'need ref or selector' };
+          const el = document.querySelector(sel);
+          if (!el) return { ok: false, error: 'not found: ' + sel };
+          if (el.tagName !== 'SELECT') return { ok: false, error: 'not a <select>: ' + sel };
+          const opts = Array.from(el.options);
+          let match = null;
+          if (index != null) match = opts[index] || null;
+          else if (value != null) match = opts.find((o) => o.value === String(value)) || null;
+          else if (label != null) match = opts.find((o) => (o.textContent || '').trim() === String(label).trim()) || null;
+          else return { ok: false, error: 'provide one of value, label, or index' };
+          if (!match) return { ok: false, error: 'no matching option' };
+          el.value = match.value;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          return { ok: true, value: match.value, label: (match.textContent || '').trim() };
+        },
+      });
+      const r = res && res.result;
+      if (r && r.ok === false) throw new Error('select: ' + r.error);
+      return r;
+    }
+
+    case 'emulate_media': {
+      const tabId = requireTab(p);
+      // Overrides persist ONLY while the debugger stays attached, so we HOLD the
+      // attachment (a session) until reset:true releases it. Repeat sets are idempotent.
+      if (p.reset) {
+        if (mediaEmu.has(tabId)) {
+          await dbg({ tabId }, 'Emulation.setEmulatedMedia', { media: '', features: [] }).catch(() => {});
+          mediaEmu.delete(tabId);
+          await dbgDetach(tabId);
+        }
+        return { ok: true, reset: true };
+      }
+      const features = [];
+      if (p.colorScheme) features.push({ name: 'prefers-color-scheme', value: p.colorScheme });
+      if (p.reducedMotion) features.push({ name: 'prefers-reduced-motion', value: p.reducedMotion });
+      if (!features.length && !p.media) throw new Error('emulate_media: provide colorScheme, reducedMotion, media, or reset:true.');
+      if (!mediaEmu.has(tabId)) { await dbgAttach(tabId); mediaEmu.add(tabId); }
+      try {
+        await dbg({ tabId }, 'Emulation.setEmulatedMedia', { media: p.media || '', features });
+      } catch (e) {
+        // Roll back the held attach if the command failed, so we don't leak a ref.
+        if (mediaEmu.has(tabId)) { mediaEmu.delete(tabId); await dbgDetach(tabId).catch(() => {}); }
+        throw e;
+      }
+      return { ok: true, colorScheme: p.colorScheme, reducedMotion: p.reducedMotion, media: p.media || null };
     }
 
     case 'upload_file': {

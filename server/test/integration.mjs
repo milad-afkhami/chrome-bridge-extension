@@ -46,6 +46,12 @@ const handlers = {
   network_capture: (p) => (p.action === 'start'
     ? { ok: true, capturing: true, tabId: p.tabId, bodies: !!p.bodies }
     : { count: 1, bodies: true, requests: [{ url: 'https://x/api', status: 200, body: '{"a":1}', base64Encoded: false, bodyBytes: 7 }] }),
+  // 1x1 transparent PNG; the extension always returns the { dataUrl } shape.
+  screenshot: () => ({ dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC' }),
+  press_key: (p) => ({ ok: true, key: p.key }),
+  select: (p) => ({ ok: true, value: p.value ?? null, label: p.label ?? null, index: p.index ?? null }),
+  emulate_media: (p) => ({ ok: true, colorScheme: p.colorScheme ?? null, reset: !!p.reset }),
+  wait_for: (p) => ({ ok: true, networkIdle: !!p.networkIdle, waitedMs: 1 }),
 };
 
 const transport = new StdioClientTransport({ command: 'node', args: [SERVER], env: { ...process.env, BRIDGE_PORT: String(PORT) } });
@@ -63,6 +69,14 @@ try {
   check('ping tool registered', !!byName.ping);
   check('exec exposes viaDebugger param', !!byName.exec?.inputSchema?.properties?.viaDebugger);
   check('network_capture exposes bodies param', !!byName.network_capture?.inputSchema?.properties?.bodies);
+  check('screenshot exposes viewport params', !!byName.screenshot?.inputSchema?.properties?.width
+    && !!byName.screenshot?.inputSchema?.properties?.height
+    && !!byName.screenshot?.inputSchema?.properties?.fullPage);
+  check('screenshot exposes selector (element clip)', !!byName.screenshot?.inputSchema?.properties?.selector);
+  check('press_key tool registered', !!byName.press_key?.inputSchema?.properties?.key);
+  check('select tool registered', !!byName.select?.inputSchema?.properties?.value);
+  check('emulate_media tool registered', !!byName.emulate_media?.inputSchema?.properties?.colorScheme);
+  check('wait_for exposes networkIdle param', !!byName.wait_for?.inputSchema?.properties?.networkIdle);
 
   // 2. ping — healthy (extension connected)
   console.log('\nping (healthy):');
@@ -90,7 +104,37 @@ try {
   const nStop = jsonOf(await client.callTool({ name: 'network_capture', arguments: { action: 'stop' } }));
   check('stop returns request with a body', nStop.requests?.[0]?.body === '{"a":1}');
 
-  // 5. ping — degraded (extension gone) must NOT throw
+  // 5. screenshot forwards viewport params and returns an image block
+  console.log('\nscreenshot device-emulation forwarding:');
+  const shotEmu = await client.callTool({ name: 'screenshot', arguments: { tabId: 7, width: 390, height: 844, deviceScaleFactor: 2, fullPage: true } });
+  check('viewport params reach extension', received.some((r) => r.action === 'screenshot' && r.params.width === 390 && r.params.height === 844 && r.params.deviceScaleFactor === 2 && r.params.fullPage === true));
+  check('emulated capture returns an image block', shotEmu.content?.[0]?.type === 'image' && shotEmu.content?.[0]?.mimeType === 'image/png');
+  const shotDefault = await client.callTool({ name: 'screenshot', arguments: { tabId: 7 } });
+  check('default capture omits viewport params', received.some((r) => r.action === 'screenshot' && r.params.width === undefined && r.params.height === undefined));
+  check('default capture returns an image block', shotDefault.content?.[0]?.type === 'image');
+  const shotClip = await client.callTool({ name: 'screenshot', arguments: { tabId: 7, selector: '[role=dialog]' } });
+  check('element-clip selector reaches extension', received.some((r) => r.action === 'screenshot' && r.params.selector === '[role=dialog]'));
+  check('element-clip returns an image block', shotClip.content?.[0]?.type === 'image');
+
+  // 6. QA primitives: press_key / select / emulate_media forwarding
+  console.log('\nQA primitives forwarding:');
+  const pk = jsonOf(await client.callTool({ name: 'press_key', arguments: { tabId: 7, key: 'Escape', modifiers: ['Shift'], selector: '#f' } }));
+  check('press_key forwards key + modifiers + selector', received.some((r) => r.action === 'press_key' && r.params.key === 'Escape' && Array.isArray(r.params.modifiers) && r.params.modifiers[0] === 'Shift' && r.params.selector === '#f'));
+  check('press_key returns ok', pk.ok === true && pk.key === 'Escape');
+  const selr = jsonOf(await client.callTool({ name: 'select', arguments: { tabId: 7, selector: '#country', label: 'Iran' } }));
+  check('select forwards label match', received.some((r) => r.action === 'select' && r.params.label === 'Iran' && r.params.selector === '#country'));
+  check('select returns label', selr.label === 'Iran');
+  const em = jsonOf(await client.callTool({ name: 'emulate_media', arguments: { tabId: 7, colorScheme: 'dark' } }));
+  check('emulate_media forwards colorScheme', received.some((r) => r.action === 'emulate_media' && r.params.colorScheme === 'dark'));
+  check('emulate_media returns ok', em.ok === true && em.colorScheme === 'dark');
+  const emReset = jsonOf(await client.callTool({ name: 'emulate_media', arguments: { tabId: 7, reset: true } }));
+  check('emulate_media reset forwards', received.some((r) => r.action === 'emulate_media' && r.params.reset === true));
+  check('emulate_media reset returns ok', emReset.ok === true && emReset.reset === true);
+  const wi = jsonOf(await client.callTool({ name: 'wait_for', arguments: { tabId: 7, networkIdle: true } }));
+  check('wait_for networkIdle reaches extension', received.some((r) => r.action === 'wait_for' && r.params.networkIdle === true));
+  check('wait_for networkIdle returns ok', wi.ok === true);
+
+  // 7. ping — degraded (extension gone) must NOT throw
   console.log('\nping (extension down):');
   extWs.close();
   await new Promise((r) => setTimeout(r, 200));

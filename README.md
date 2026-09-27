@@ -33,6 +33,12 @@ so a session can't hijack the page you're working on. Only `list_tabs` and `open
 - `click {ref?|selector?, tabId}` → click by snapshot ref (preferred) or CSS selector.
 - `fill {ref?|selector?, value, submit?, tabId}` → set an input/textarea/contenteditable (native
   setter + input/change events for React/Vue); `submit:true` presses Enter / submits the form.
+- `select {ref?|selector?, value?|label?|index?, tabId}` → set a native `<select>` by option value,
+  visible label, or index, firing input/change (what `fill` can't do). No banner.
+- `press_key {key, modifiers?, selector?, tabId}` → press a key (`Enter`, `Escape`, `Tab`,
+  `Backspace`, `ArrowDown`, …, or a single char), optionally focusing `selector` first — the keyboard
+  primitive `fill` lacks (close a modal, submit, Tab through focus). **Uses the debugger** → briefly
+  shows the "debugging this browser" bar, then detaches.
 - `hover {ref?|selector?, tabId}` → dispatch real pointer/mouse-over events. Opens JS-driven hover
   menus (React/Vue/jQuery `onmouseenter`/`onmouseover`); **pure-CSS `:hover` menus won't open** —
   synthetic events can't drive CSS `:hover` (that needs the debugger, which we avoid).
@@ -44,10 +50,23 @@ so a session can't hijack the page you're working on. Only `list_tabs` and `open
   no banner. Strict-CSP pages (GitHub/Google) can block eval → returns `null` there.
 
 **Wait, capture, upload**
-- `wait_for {tabId, selector?, text?, gone?, timeoutMs?}` → poll in-page until a selector appears
-  (or disappears with `gone:true`), text is present, or (with neither) the page finishes loading.
-- `screenshot {tabId}` → PNG image. If the tab isn't frontmost it briefly flashes to front to render,
-  then restores focus.
+- `wait_for {tabId, selector?, text?, gone?, networkIdle?, idleMs?, timeoutMs?}` → poll until a
+  selector appears (or disappears with `gone:true`), text is present, the tab settles
+  (`networkIdle:true` — no in-flight requests for `idleMs`, default 500ms), or (with none) the page
+  finishes loading. Use `networkIdle` after `navigate`/`click` so multi-step flows don't race.
+- `screenshot {tabId, width?, height?, deviceScaleFactor?, mobile?, fullPage?, selector?}` → PNG image.
+  Default mode captures at the real window size; if the tab isn't frontmost it briefly flashes to front
+  to render, then restores focus. Pass `width` **and** `height` for a device-emulated capture (e.g.
+  `{width:390, height:844}` for a phone viewport) — rendered off-screen via CDP, so it does **not**
+  change focus or resize the real window (`deviceScaleFactor` default 2, `mobile` default true,
+  `fullPage:true` captures the whole scrollable page). Pass `selector` to clip to a single element (a
+  card/modal), composable with the viewport params. The CDP modes (any of `width`/`height`/`selector`)
+  briefly show Chrome's "being debugged" banner while attached (same trade-off as `exec
+  viaDebugger`/`upload_file`), then detach.
+- `emulate_media {tabId, colorScheme?, reducedMotion?, media?, reset?}` → force a tab's CSS media state
+  for theme/motion/print QA (`colorScheme:"dark"`, `reducedMotion:"reduce"`, `media:"print"`). The
+  override **persists** across later `navigate`/`exec`/`screenshot` on that tab (it holds a debugger
+  session, so the "being debugged" banner stays up) until `reset:true` clears it and detaches.
 - `network_capture {action:"start"|"stop", tabId?}` → record requests (url/method/type/status/timing)
   via webRequest (optionally scoped to one tab). No response bodies (use `exec`+`fetch` for those).
 - `console_capture {action:"start"|"stop", tabId}` → record console logs + uncaught errors

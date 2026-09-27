@@ -122,7 +122,7 @@ function call(action, params = {}, timeoutMs = 30000) {
 const out = (data) => ({ content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data, null, 2) }] });
 
 // ---------------- MCP server + tools ----------------
-const server = new McpServer({ name: 'chrome-bridge', version: '0.4.0' });
+const server = new McpServer({ name: 'chrome-bridge', version: '0.5.0' });
 
 server.registerTool('ping',
   {
@@ -245,19 +245,22 @@ server.registerTool('wait_for',
   {
     description:
       'Wait until a condition holds in a tab, polling in-page every 250ms (no banner). Provide ONE of: ' +
-      'selector (wait until it appears, or disappears if gone:true), or text (wait until the page ' +
-      'contains it). With neither, waits for document.readyState === "complete". Returns {ok, waitedMs} ' +
-      'or errors on timeout. Use after navigate/click on dynamic pages instead of guessing.',
+      'selector (wait until it appears, or disappears if gone:true), text (wait until the page ' +
+      'contains it), or networkIdle:true (wait until no requests have been in flight for ~500ms — the ' +
+      'way to let a page settle after navigate/click before reading it). With none, waits for ' +
+      'document.readyState === "complete". Returns {ok, waitedMs} or errors on timeout.',
     inputSchema: {
       selector: z.string().optional().describe('CSS selector to wait for.'),
       text: z.string().optional().describe('Substring of visible text to wait for.'),
       gone: z.boolean().optional().describe('With selector: wait until it is ABSENT instead of present.'),
+      networkIdle: z.boolean().optional().describe('Wait until the tab has had no in-flight requests for idleMs.'),
+      idleMs: z.number().optional().describe('Quiet window for networkIdle (default 500ms).'),
       timeoutMs: z.number().optional().describe('Default 10000. Keep ≤ 30000.'),
       tabId: z.number().describe('Target tab id from list_tabs (required).'),
     },
   },
-  async ({ selector, text, gone, timeoutMs, tabId }) =>
-    out(await call('wait_for', { selector, text, gone, timeoutMs, tabId }, (timeoutMs || 10000) + 5000)));
+  async ({ selector, text, gone, networkIdle, idleMs, timeoutMs, tabId }) =>
+    out(await call('wait_for', { selector, text, gone, networkIdle, idleMs, timeoutMs, tabId }, (timeoutMs || 10000) + 5000)));
 
 server.registerTool('console_capture',
   {
@@ -315,17 +318,87 @@ server.registerTool('close_tab',
 server.registerTool('screenshot',
   {
     description:
-      'Capture a PNG of a tab and return it as an image. Requires a tabId (from list_tabs). If that ' +
-      'tab is not frontmost, it is briefly flashed to the front to render, then the previous tab is ' +
-      'restored (a short flicker — the only tool that touches focus, and only for a moment).',
-    inputSchema: { tabId: z.number().describe('Target tab id from list_tabs (required).') },
+      'Capture a PNG of a tab and return it as an image. Requires a tabId (from list_tabs). Two modes:\n' +
+      '• Default (no viewport params): captures the tab at its real window size via captureVisibleTab. If ' +
+      'that tab is not frontmost, it is briefly flashed to the front to render, then the previous tab is ' +
+      'restored (a short flicker — this mode touches focus, only for a moment).\n' +
+      '• Device-emulated (pass width AND height): renders off-screen at an emulated mobile/device viewport ' +
+      'via the DevTools Protocol — no focus change and no resize of the real window. Use this for ' +
+      'mobile-viewport UI QA. This mode briefly shows Chrome\'s "being debugged" banner while attached ' +
+      '(the same trade-off as exec viaDebugger / upload_file); it detaches immediately after.\n' +
+      'Pass selector to clip the capture to a single element (a card/modal), off-screen and focus-free; ' +
+      'combine it with width/height to shoot one component at a mobile viewport. selector also uses CDP ' +
+      '(the banner shows briefly).',
+    inputSchema: {
+      tabId: z.number().describe('Target tab id from list_tabs (required).'),
+      width: z.number().optional().describe('Emulated viewport width (CSS px). Provide with height for a device-emulated capture.'),
+      height: z.number().optional().describe('Emulated viewport height (CSS px).'),
+      deviceScaleFactor: z.number().optional().describe('Device pixel ratio for the emulated capture (default 2).'),
+      mobile: z.boolean().optional().describe('Emulate a mobile device (default true when width/height given).'),
+      fullPage: z.boolean().optional().describe('Capture the full scrollable page instead of just the viewport.'),
+      selector: z.string().optional().describe('CSS selector to clip the capture to a single element (scrolled into view first).'),
+    },
   },
-  async ({ tabId }) => {
-    const r = await call('screenshot', { tabId });
+  async ({ tabId, width, height, deviceScaleFactor, mobile, fullPage, selector }) => {
+    const r = await call('screenshot', { tabId, width, height, deviceScaleFactor, mobile, fullPage, selector });
     const b64 = String((r && r.dataUrl) || '').replace(/^data:image\/png;base64,/, '');
     if (!b64) return out(r);
     return { content: [{ type: 'image', data: b64, mimeType: 'image/png' }] };
   });
+
+server.registerTool('press_key',
+  {
+    description:
+      'Press a keyboard key in a tab via the DevTools protocol — the keyboard primitive fill lacks. ' +
+      'Use for Escape (close a modal), Enter (submit), Tab (move focus / a11y checks), arrows, ' +
+      'Backspace/Delete, Home/End/PageUp/PageDown, or a single printable character. Optionally focus ' +
+      'an element first with selector. Dispatches a real keydown+keyup (and a char for printable keys) ' +
+      'so the page\'s handlers fire. Shows the "being debugged" banner briefly, then detaches.',
+    inputSchema: {
+      key: z.string().describe('Key name (Enter, Escape, Tab, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, Space) or a single character.'),
+      modifiers: z.array(z.enum(['Alt', 'Control', 'Meta', 'Shift'])).optional().describe('Modifier keys held during the press.'),
+      selector: z.string().optional().describe('CSS selector to focus before pressing (optional).'),
+      tabId: z.number().describe('Target tab id from list_tabs (required).'),
+    },
+  },
+  async ({ key, modifiers, selector, tabId }) => out(await call('press_key', { key, modifiers, selector, tabId })));
+
+server.registerTool('select',
+  {
+    description:
+      'Set a native <select> dropdown by option value, visible label, or index, then fire input+change ' +
+      'so frameworks (React/Vue) react. This is what fill can\'t do (fill only handles ' +
+      'input/textarea/contenteditable). Runs in the page — no focus change, no banner. Provide exactly ' +
+      'one of value / label / index.',
+    inputSchema: {
+      ref: z.string().optional().describe('A ref from snapshot, e.g. "e9".'),
+      selector: z.string().optional().describe('CSS selector of the <select> (use if you have no ref).'),
+      value: z.string().optional().describe('Match the option by its value attribute.'),
+      label: z.string().optional().describe('Match the option by its visible text.'),
+      index: z.number().optional().describe('Match the option by its zero-based index.'),
+      tabId: z.number().describe('Target tab id from list_tabs (required).'),
+    },
+  },
+  async ({ ref, selector, value, label, index, tabId }) => out(await call('select', { ref, selector, value, label, index, tabId })));
+
+server.registerTool('emulate_media',
+  {
+    description:
+      'Force a tab\'s CSS media state for theme/motion/print QA: colorScheme "dark"|"light"|"no-preference" ' +
+      '(prefers-color-scheme), reducedMotion "reduce"|"no-preference" (prefers-reduced-motion), and/or ' +
+      'media "screen"|"print". The override PERSISTS across later navigate/exec/screenshot calls on that ' +
+      'tab because it holds a DevTools session open — so the "being debugged" banner stays up until you ' +
+      'call emulate_media {reset:true} (which clears the override and detaches). Repeat calls just update ' +
+      'the override; they do not stack.',
+    inputSchema: {
+      colorScheme: z.enum(['light', 'dark', 'no-preference']).optional().describe('Force prefers-color-scheme.'),
+      reducedMotion: z.enum(['reduce', 'no-preference']).optional().describe('Force prefers-reduced-motion.'),
+      media: z.enum(['screen', 'print']).optional().describe('Force the media type.'),
+      reset: z.boolean().optional().describe('Clear the override and detach the held session.'),
+      tabId: z.number().describe('Target tab id from list_tabs (required).'),
+    },
+  },
+  async ({ colorScheme, reducedMotion, media, reset, tabId }) => out(await call('emulate_media', { colorScheme, reducedMotion, media, reset, tabId })));
 
 server.registerTool('upload_file',
   {
