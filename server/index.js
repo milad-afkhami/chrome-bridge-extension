@@ -122,7 +122,15 @@ function call(action, params = {}, timeoutMs = 30000) {
 const out = (data) => ({ content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data, null, 2) }] });
 
 // ---------------- MCP server + tools ----------------
-const server = new McpServer({ name: 'chrome-bridge', version: '0.5.0' });
+const TAB_LIFECYCLE_INSTRUCTIONS =
+  'Tab lifecycle: if you create a tab with open_tab, close it with close_tab as soon as the ' +
+  'browser task is complete. Never close a pre-existing tab discovered through list_tabs unless ' +
+  'the user explicitly asks you to.';
+
+const server = new McpServer(
+  { name: 'chrome-bridge', version: '0.5.0' },
+  { instructions: TAB_LIFECYCLE_INSTRUCTIONS },
+);
 
 server.registerTool('ping',
   {
@@ -301,7 +309,8 @@ server.registerTool('open_tab',
       'Open a new tab, in the BACKGROUND by default (does not focus it). active:true focuses it; ' +
       'newWindow:true opens a new window; incognito:true opens an isolated window with its own ' +
       'cookie jar (NOT logged in). Returns {tabId, windowId}. Combine with per-tabId exec/read to ' +
-      'drive several tabs in parallel.',
+      'drive several tabs in parallel. When the browser task is complete, close every tab you ' +
+      'created with close_tab.',
     inputSchema: {
       url: z.string().optional().describe('URL to open; omit for about:blank.'),
       active: z.boolean().optional().describe('Focus the new tab (default false).'),
@@ -312,7 +321,12 @@ server.registerTool('open_tab',
   async (a) => out(await call('open_tab', a)));
 
 server.registerTool('close_tab',
-  { description: 'Close a tab by id.', inputSchema: { tabId: z.number() } },
+  {
+    description:
+      'Close a tab by id. Use this to clean up every tab you created with open_tab once the browser ' +
+      'task is complete. Never close a pre-existing tab from list_tabs unless the user explicitly asks.',
+    inputSchema: { tabId: z.number() },
+  },
   async ({ tabId }) => out(await call('close_tab', { tabId })));
 
 server.registerTool('screenshot',

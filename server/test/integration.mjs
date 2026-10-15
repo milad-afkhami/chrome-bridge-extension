@@ -66,6 +66,15 @@ try {
   const { tools } = await client.listTools();
   const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
   console.log('\nTool registration:');
+  const instructions = client.getInstructions() ?? '';
+  check('server instructions require closing agent-created tabs',
+    instructions.includes('open_tab') && instructions.includes('close_tab'));
+  check('server instructions preserve pre-existing user tabs',
+    instructions.includes('pre-existing tab'));
+  check('open_tab description includes cleanup guidance',
+    byName.open_tab?.description?.includes('close_tab'));
+  check('close_tab description preserves pre-existing tabs',
+    byName.close_tab?.description?.includes('pre-existing tab'));
   check('ping tool registered', !!byName.ping);
   check('exec exposes viaDebugger param', !!byName.exec?.inputSchema?.properties?.viaDebugger);
   check('network_capture exposes bodies param', !!byName.network_capture?.inputSchema?.properties?.bodies);

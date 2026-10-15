@@ -80,7 +80,9 @@ Pick a tab first: `list_tabs` to drive one that's already open, or `open_tab` to
 thread that `tabId` through every call. Then `snapshot` → act by `ref` (`click`/`fill`/`hover`) →
 `wait_for` → `snapshot` again. This lets the LLM drive a page it has never seen — including CSP-locked
 ones — without dumping raw HTML into context or guessing selectors, and without ever touching the tab
-you're working in.
+you're working in. When the task is complete, the agent should use `close_tab` for every tab it created
+with `open_tab`; it should never close a pre-existing tab found through `list_tabs` unless explicitly
+asked to do so.
 
 ## Install
 
